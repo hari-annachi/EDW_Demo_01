@@ -1,7 +1,7 @@
 USE [EDW]
 GO
 
-/****** Object:  StoredProcedure [dbo].[spc_DIM_PRESCRIBER_AMA_OUTPUT_FLAG_UPPDATE]    Script Date: 4/6/2021 2:44:37 PM ******/
+/****** Object:  StoredProcedure [dbo].[spc_DIM_PRESCRIBER_AMA_OUTPUT_FLAG_UPPDATE]    Script Date: 4/6/2021 2:48:07 PM ******/
 SET ANSI_NULLS ON
 GO
 
@@ -9,112 +9,110 @@ SET QUOTED_IDENTIFIER ON
 GO
 
 
---spc_DIM_PRESCRIBER_AMA_OUTPUT_FLAG_UPPDATE
---spc_EDW_FACT_CASE_MGMT_CASE_LOAD
---spc_FACT_CASE_MGMT_PARTITION_RANGE_BUILD
---spc_FACT_CASE_MGMT_PARTITION_LOAD
---spc_EDW_FACT_CASE_MGMT_NOTE_VBD
---spc_EDW_FACT_CASE_MGMT_CASE_VBD
---spc_EDW_FACT_CASE_MGMT_CASE_WORKFLOW_VBD
---spc_EDW_FACT_CASE_MGMT_VBD
---spc_EDWWORK_WRK_FACT_CASE_MGMT_SF_ALLOC_LOCATION_BUILD
---spc_EDW_FACT_SURVEY_LOAD
---spc_EDW_FACT_SURVEY_COUPON_LOAD
---spc_EDW_FACT_SURVEY_LOAD_TCPLP
---spc_WRK_FACT_CASE_MGMT_CASE_ENROLLMENT_EXT_UPDATE
---spc_INDEX_REBUILD_FOR_FRAGMENTATION_STALE_STATS
---spc_MV_RPT_CASE_MGMT_PARTITION_LOAD
---spc_MV_CREATE_FOR_MSTR_REPORTING
---spc_FACT_CASE_MGMT_NONCLUSTERED_INDEX_DISABLE_REBUILD
---Dropping OLD CM SPs
-
------------------------------Start spc_DIM_PRESCRIBER_AMA_OUTPUT_FLAG_UPPDATE -----------------------------
-
-CREATE PROCEDURE [dbo].[spc_DIM_PRESCRIBER_AMA_OUTPUT_FLAG_UPPDATE]	 
-AS
 
 -- =============================================================================================
 -- Author:		Vivek Palanisamy
 -- Create date: 5/14/2020
 -- Description:	Updates Edw.DIM_PRESCRIBER's AMA_OUTPUT_FLAG_KEY 
+-- 11/26/2020    modified Vivek TP - Altered the data pull to the stage table STG_TORRO_PRESCRIBER
+--                                 - and the target table to be DIM_MASTER_PRESCRIBER - STRY0087953
 -- =============================================================================================
+
+CREATE PROCEDURE [dbo].[spc_DIM_PRESCRIBER_AMA_OUTPUT_FLAG_UPPDATE]	 
+(
+	@P_RUN_CTRL_ID   int
+)
+AS
 
 BEGIN	
 	
 	SET NOCOUNT ON;
+    
+	-- base data from STG_TORRO_PRESCRIBER
 
-	if exists(select top 1 * from edwwork.wrk_dim_prescriber_ama_optout_flag_upd)
-	begin
-		create clustered index CIDX_WRK_PRESCRIBER_ID_LIST_KEY on edwwork.wrk_dim_prescriber_ama_optout_flag_upd( src_prescriber_id asc, dim_prescriber_list_key asc)
-		-- 6 sec
+	SELECT distinct PRESCRIBERCODE, USEPRESCRIBERMASK INTO #WRK_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD 
+	FROM EDWSTG.STG_TORRO_PRESCRIBER WHERE USEPRESCRIBERMASK <> 0
 
-		select dim_prescriber_key ,wrk.AMA_OPTOUT_FLAG_KEY, wrk.update_dtt, wrk.RUN_CONTROL_ID, row_number() over (order by dim_prescriber_key asc) as row_nbr
-		into #L_TEMP_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD
-		from EDWWORK.WRK_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD as wrk
-		join edw.dim_prescriber dp (nolock) on dp.SRC_PRESCRIBER_ID = wrk.src_prescriber_id 
-			and dp.DIM_PRESCRIBER_LIST_KEY = wrk.dim_prescriber_list_key
-		-- 10 sec to load 14 mill
+	/* ama new changes after discussion with penny and mark on 0119 */
+	
+	SELECT DIM_MASTER_PRESCRIBER_KEY, 0 AS AMA_OPTOUT_FLAG_KEY into #WRK_DIM_MASTER_PRESCRIBER_UPD1_UPD0
+	FROM EDW.DIM_MASTER_PRESCRIBER DMP WHERE AMA_OPTOUT_FLAG_KEY = 1
+	AND NOT EXISTS (
+	SELECT 1 
+	FROM EDWSTG.STG_TORRO_PRESCRIBER WHERE USEPRESCRIBERMASK = 1 
+	AND PRESCRIBERCODE = DMP.MASTER_PRESCRIBER_CODE )
+	
 
-		create clustered index CIDX_WRK_PRESCRIBER_ID_LIST_KEY on #L_TEMP_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD( row_nbr asc, dim_prescriber_key asc)
-		-- 6 sec
-	end
+	
+	IF EXISTS(SELECT TOP 1 * FROM #WRK_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD)
+	BEGIN
+	CREATE CLUSTERED INDEX CDX_PRESCRIBERCODE ON #WRK_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD
+	(PRESCRIBERCODE ASC)
+		-- 6 SEC
+		
+		SELECT DIM_MASTER_PRESCRIBER_KEY , [AMA_OPTOUT_FLAG_KEY], 
+		GETDATE() AS UPDATE_DTT, ROW_NUMBER() OVER (ORDER BY DIM_MASTER_PRESCRIBER_KEY ASC) AS ROW_NBR
+		INTO #L_TEMP_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD
+		FROM
+		(SELECT DIM_MASTER_PRESCRIBER_KEY ,WRK.USEPRESCRIBERMASK AS [AMA_OPTOUT_FLAG_KEY]
+		FROM #WRK_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD AS WRK
+		JOIN EDW.DIM_MASTER_PRESCRIBER DMP (NOLOCK) ON DMP.MASTER_PRESCRIBER_CODE = WRK.PRESCRIBERCODE  
+			WHERE DMP.AMA_OPTOUT_FLAG_KEY <> WRK.USEPRESCRIBERMASK
+		UNION
+		SELECT DIM_MASTER_PRESCRIBER_KEY, [AMA_OPTOUT_FLAG_KEY] FROM #WRK_DIM_MASTER_PRESCRIBER_UPD1_UPD0
+		) A
+		-- 10 SEC TO LOAD 14 MILL
+
+	CREATE CLUSTERED INDEX CIDX_WRK_PRESCRIBER_ID_LIST_KEY ON #L_TEMP_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD( ROW_NBR ASC, DIM_MASTER_PRESCRIBER_KEY ASC)
+
+	END
 
 	------------------------------
-	declare
-		@row_count integer = 0
-	,	@loop integer = 0
-	,	@upd_count integer
-	,	@row_cnt integer
-	,	@row_cnt1 integer
+	DECLARE
+		@ROW_COUNT INTEGER = 0
+	,	@LOOP INTEGER = 0
+	,	@UPD_COUNT INTEGER
+	,	@ROW_CNT INTEGER
+	,	@ROW_CNT1 INTEGER
 
-	if (object_id('tempdb..#L_TEMP_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD') ) is not null
-	begin
-		select @row_count = count(1) from #L_TEMP_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD
-	end
+	IF (OBJECT_ID('TEMPDB..#L_TEMP_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD') ) IS NOT NULL AND EXISTS(SELECT TOP 1 * FROM #L_TEMP_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD)
+	BEGIN
+		SELECT @ROW_COUNT = COUNT(1) FROM #L_TEMP_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD
+	END
 
-	--print 'total rows to be updated: ' + cast(@row_count as varchar(max))
+	--PRINT 'TOTAL ROWS TO BE UPDATED: ' + CAST(@ROW_COUNT AS VARCHAR(MAX))
 
-	set @row_cnt = 0
-	set @row_cnt1 = 1000000
+	SET @ROW_CNT = 0
+	SET @ROW_CNT1 = 1000000
 
  
-	while (@loop <= @row_count / 1000000 and @row_count > 0 )
-	begin
+	WHILE (@LOOP <= @ROW_COUNT / 1000000 AND @ROW_COUNT > 0 )
+	BEGIN
 
-		begin transaction dp1000000
+		BEGIN TRANSACTION DP1000000
 
-			update dp 
-			set
-				dp.AMA_OPTOUT_FLAG_KEY = wrk.AMA_OPTOUT_FLAG_KEY
-			,	dp.UPDATE_DTT = wrk.UPDATE_DTT
-			,	dp.RUN_CONTROL_ID = wrk.RUN_CONTROL_ID
-			from edw.dim_prescriber dp
-			join #L_TEMP_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD wrk on wrk.DIM_PRESCRIBER_KEY = dp.DIM_PRESCRIBER_KEY
-				--and dp.dim_source_key = 13
-			where
-				wrk.row_nbr >= @row_cnt 
-			and	wrk.row_nbr < @row_cnt1
+			UPDATE DMP 
+			SET
+				DMP.AMA_OPTOUT_FLAG_KEY = WRK.AMA_OPTOUT_FLAG_KEY
+			,	DMP.UPDATE_DTT = WRK.UPDATE_DTT
+			,	DMP.RUN_CTRL_ID = @P_RUN_CTRL_ID
+			FROM EDW.DIM_MASTER_PRESCRIBER DMP
+			JOIN #L_TEMP_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD WRK ON WRK.DIM_MASTER_PRESCRIBER_KEY = DMP.DIM_MASTER_PRESCRIBER_KEY
+			WHERE
+				WRK.ROW_NBR >= @ROW_CNT 
+			AND	WRK.ROW_NBR < @ROW_CNT1
 
-			set @upd_count = @@ROWCOUNT
+			SET @UPD_COUNT = @@ROWCOUNT
 
-			--print 'updated count :' + cast(@upd_count as varchar(max));
-			--print 'range from ' + cast(@row_cnt as varchar) + 'to ' + cast(@row_cnt1 as varchar(max));
+		COMMIT TRANSACTION DP1000000
 
-		commit transaction dp1000000
+		SET @ROW_CNT = @ROW_CNT + 1000000
+		SET @ROW_CNT1 = @ROW_CNT1 + 1000000
+		SET @LOOP = @LOOP + 1
 
-		set @row_cnt = @row_cnt + 1000000
-		set @row_cnt1 = @row_cnt1 + 1000000
-		set @loop = @loop + 1
+	END
 
-	end
-
-	if @row_count > 0
-	begin
-		drop index CIDX_WRK_PRESCRIBER_ID_LIST_KEY on edwwork.wrk_dim_prescriber_ama_optout_flag_upd
-
-		truncate table EDWWORK.WRK_DIM_PRESCRIBER_AMA_OPTOUT_FLAG_UPD
-	end
-	-- total update took 3 mins and 4 sec
+	-- total update took 3 mins and 4 sec;
 
  END
 
